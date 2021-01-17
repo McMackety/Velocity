@@ -56,7 +56,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
   public boolean handle(LoginPluginMessage packet) {
     MinecraftConnection mc = serverConn.ensureConnected();
     VelocityConfiguration configuration = server.getConfiguration();
-    if (configuration.getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN && packet
+    if ((configuration.getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN || configuration.getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN_ENCRYPTED)&& packet
         .getChannel().equals(VelocityConstants.VELOCITY_IP_FORWARDING_CHANNEL)) {
       ByteBuf forwardingData = createForwardingData(configuration.getForwardingSecret(),
           cleanRemoteAddress(serverConn.getPlayer().getRemoteAddress()),
@@ -86,7 +86,7 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(ServerLoginSuccess packet) {
-    if (server.getConfiguration().getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN
+    if ((server.getConfiguration().getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN || server.getConfiguration().getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN_ENCRYPTED)
         && !informationForwarded) {
       resultFuture.complete(ConnectionRequestResults.forDisconnect(MODERN_IP_FORWARDING_FAILURE,
           serverConn.getServer()));

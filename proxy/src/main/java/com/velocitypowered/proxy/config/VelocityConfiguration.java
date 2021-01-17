@@ -49,7 +49,7 @@ public class VelocityConfiguration implements ProxyConfig {
   @Expose private boolean onlineMode = true;
   @Expose private boolean preventClientProxyConnections = false;
   @Expose private PlayerInfoForwarding playerInfoForwardingMode = PlayerInfoForwarding.NONE;
-  private byte[] forwardingSecret = generateRandomString(12).getBytes(StandardCharsets.UTF_8);
+  private byte[] forwardingSecret = generateRandomString(32).getBytes(StandardCharsets.UTF_8);
   @Expose private boolean announceForge = false;
   @Expose private boolean onlineModeKickExistingPlayers = false;
   @Expose private PingPassthroughMode pingPassthrough = PingPassthroughMode.DISABLED;
@@ -125,6 +125,11 @@ public class VelocityConfiguration implements ProxyConfig {
             + "from the proxy and will have offline-mode UUIDs.");
         break;
       case MODERN:
+      case MODERN_ENCRYPTED:
+        if (forwardingSecret == null || forwardingSecret.length < 32) {
+          logger.error("Your forwarding secret is less that 32 characters, it must 32 or more characters for secure encryption.");
+          valid = false;
+        }
       case BUNGEEGUARD:
         if (forwardingSecret == null || forwardingSecret.length == 0) {
           logger.error("You don't have a forwarding secret set. This is required for security.");
