@@ -126,10 +126,6 @@ public class VelocityConfiguration implements ProxyConfig {
         break;
       case MODERN:
       case MODERN_ENCRYPTED:
-        if (forwardingSecret == null || forwardingSecret.length < 32) {
-          logger.error("Your forwarding secret is less that 32 characters, it must 32 or more characters for secure encryption.");
-          valid = false;
-        }
       case BUNGEEGUARD:
         if (forwardingSecret == null || forwardingSecret.length == 0) {
           logger.error("You don't have a forwarding secret set. This is required for security.");

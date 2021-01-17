@@ -26,6 +26,7 @@ import com.velocitypowered.proxy.command.builtin.GlistCommand;
 import com.velocitypowered.proxy.command.builtin.ServerCommand;
 import com.velocitypowered.proxy.command.builtin.ShutdownCommand;
 import com.velocitypowered.proxy.command.builtin.VelocityCommand;
+import com.velocitypowered.proxy.config.PlayerInfoForwarding;
 import com.velocitypowered.proxy.config.VelocityConfiguration;
 import com.velocitypowered.proxy.connection.client.ConnectedPlayer;
 import com.velocitypowered.proxy.console.VelocityConsole;
@@ -50,21 +51,17 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import java.io.IOException;
+
+import java.io.*;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.AccessController;
-import java.security.KeyPair;
-import java.security.PrivilegedAction;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.UUID;
+import java.security.*;
+import java.security.cert.X509Certificate;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -74,6 +71,10 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntFunction;
 import java.util.stream.Collectors;
+
+import io.netty.handler.codec.base64.Base64Encoder;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.audience.ForwardingAudience;
 import net.kyori.adventure.text.Component;
@@ -86,6 +87,8 @@ import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import sun.security.provider.X509Factory;
+import sun.security.x509.*;
 
 public class VelocityServer implements ProxyServer, ForwardingAudience {
 
@@ -111,6 +114,7 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
   private final ProxyOptions options;
   private @MonotonicNonNull VelocityConfiguration configuration;
   private @MonotonicNonNull KeyPair serverKeyPair;
+  private SslContext sslContext;
   private final ServerMap servers;
   private final VelocityCommandManager commandManager;
   private final AtomicBoolean shutdownInProgress = new AtomicBoolean(false);
@@ -202,6 +206,58 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
 
     this.doStartupConfigLoad();
 
+    if (configuration.getPlayerInfoForwardingMode() == PlayerInfoForwarding.MODERN_ENCRYPTED) {
+      try {
+        logger.info("Generating Server Certificates...");
+        X509Certificate cert = generateX509(serverKeyPair);
+
+        X509Certificate backendCert;
+        KeyPair backendKeyPair = null;
+        File backendCertFile = new File("server.cert");
+        if (!backendCertFile.exists()) {
+          logger.info("Generating Backend Certificates...");
+          backendKeyPair = EncryptionUtils.createRsaKeyPair(1024);
+          backendCert = generateX509(backendKeyPair);
+          OutputStream writer = new FileOutputStream(backendCertFile);
+          ((X509CertImpl) backendCert).derEncode(writer);
+          writer.close();
+          logger.info("Backend certificate written to server.cert, copy this to your backend servers.");
+        } else {
+          logger.info("Found server.cert as trusted certificate.");
+          backendCert = new X509CertImpl(new FileInputStream(backendCertFile));
+        }
+
+        File backendPrivFile = new File("server.priv");
+        if (!backendPrivFile.exists()) {
+          if (backendKeyPair == null) {
+            logger.error("There is a server.cert without a server.priv, please delete the server.cert if you lost the server.priv.");
+            return;
+          }
+          logger.info("Writing backend private keys to server.priv...");
+          OutputStream writer = new FileOutputStream(backendPrivFile);
+          writer.write(backendKeyPair.getPrivate().getEncoded());
+          writer.close();
+          logger.info("Wrote to server.priv... copy server.cert and server.priv to your backend server.");
+        } else {
+          logger.info("Loading server.priv...");
+          byte[] bytes = Files.readAllBytes(backendPrivFile.toPath());
+          PKCS8EncodedKeySpec spec =
+                  new PKCS8EncodedKeySpec(bytes);
+          KeyFactory kf = KeyFactory.getInstance("RSA");
+          backendKeyPair = new KeyPair(cert.getPublicKey(), kf.generatePrivate(spec));
+        }
+
+        sslContext = SslContextBuilder
+                .forClient()
+                .trustManager(backendCert)
+                .keyManager(serverKeyPair.getPrivate(), cert)
+                .build();
+      } catch (Exception e) {
+        e.printStackTrace();
+        logger.error("Couldn't initialize sslContext: {}", e.getMessage());
+      }
+    }
+
     for (Map.Entry<String, String> entry : configuration.getServers().entrySet()) {
       servers.register(new ServerInfo(entry.getKey(), AddressUtil.parseAddress(entry.getValue())));
     }
@@ -229,6 +285,37 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
     }
 
     Metrics.VelocityMetrics.startMetrics(this, configuration.getMetrics());
+  }
+
+  private X509Certificate generateX509(KeyPair serverKeyPair) throws Exception {
+    X509CertInfo info = new X509CertInfo();
+    Calendar cal = Calendar.getInstance();
+    Date from = cal.getTime();
+    cal.add(Calendar.YEAR, 10);
+    Date to = cal.getTime();
+    CertificateValidity interval = new CertificateValidity(from, to);
+    BigInteger sn = new BigInteger(64, new SecureRandom());
+    X500Name owner = new X500Name("CN=velocity");
+
+    info.set(X509CertInfo.VALIDITY, interval);
+    info.set(X509CertInfo.SERIAL_NUMBER, new CertificateSerialNumber(sn));
+    info.set(X509CertInfo.SUBJECT, owner);
+    info.set(X509CertInfo.ISSUER, owner);
+    info.set(X509CertInfo.KEY, new CertificateX509Key(serverKeyPair.getPublic()));
+    info.set(X509CertInfo.VERSION, new CertificateVersion(CertificateVersion.V3));
+    AlgorithmId algo = new AlgorithmId(AlgorithmId.md5WithRSAEncryption_oid);
+    info.set(X509CertInfo.ALGORITHM_ID, new CertificateAlgorithmId(algo));
+
+    // Sign the cert to identify the algorithm that's used.
+    X509CertImpl cert = new X509CertImpl(info);
+    cert.sign(serverKeyPair.getPrivate(), "SHA256withRSA");
+
+    // Update the algorithm, and resign.
+    algo = (AlgorithmId) cert.get(X509CertImpl.SIG_ALG);
+    info.set(CertificateAlgorithmId.NAME + "." + CertificateAlgorithmId.ALGORITHM, algo);
+    cert = new X509CertImpl(info);
+    cert.sign(serverKeyPair.getPrivate(), "SHA256withRSA");
+    return cert;
   }
 
   @SuppressFBWarnings("DM_EXIT")
@@ -492,6 +579,10 @@ public class VelocityServer implements ProxyServer, ForwardingAudience {
 
   public Ratelimiter getIpAttemptLimiter() {
     return ipAttemptLimiter;
+  }
+
+  public SslContext getSslContext() {
+    return sslContext;
   }
 
   /**
